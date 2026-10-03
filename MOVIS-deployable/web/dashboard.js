@@ -10,6 +10,7 @@ let state = {
   returns: [],
   movements: [],
   adjustments: [],
+  scans: [],
 };
 const names = {
   security: ["ACCOUNT SECURITY", "Protect your workspace"],
@@ -102,7 +103,6 @@ async function api(path, body) {
     const response = await fetch(path, {
       headers: {
         "Content-Type": "application/json",
-        ...(token ? { Authorization: "Bearer " + token } : {}),
       },
       method: body === undefined ? "GET" : "POST",
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -169,11 +169,12 @@ async function refresh() {
   $("refresh").disabled = true;
   const run = generation;
   try {
-    const [inventory, returns, movements, adjustments] = await Promise.all([
+    const [inventory, returns, movements, adjustments, scans] = await Promise.all([
       api("/inventory"),
       api("/reports/returns"),
       api("/reports/movements"),
       api("/reports/adjustments"),
+      api("/reports/scans"),
     ]);
     if (run !== generation || !token) return;
     state = {
@@ -181,6 +182,7 @@ async function refresh() {
       returns: returns.rows,
       movements: movements.rows,
       adjustments: adjustments.rows,
+      scans: scans.rows,
     };
     render();
     connection(true);
@@ -299,6 +301,9 @@ function render() {
   renderReturns();
   renderMovements("recent-table", state.movements.slice(0, 5));
   renderMovements("activity-table", state.movements);
+  table($('scan-history-table'), ['Scan date', 'Location', 'Mode', 'Verification', 'User'],
+    state.scans.map(s => [date(s.created_at), s.location, s.mode === 'demo' ? 'DEMO samples' : 'YOLO', s.verification_status, s.username]),
+    'No Android scan records', 'Scans created in Android appear here. Only confirmed stock changes are committed.');
   renderAdjustments();
 }
 function renderInventory() {
@@ -486,14 +491,17 @@ async function signOut(revoke = true) {
     returns: [],
     movements: [],
     adjustments: [],
+    scans: [],
   };
+  editing=null;editKey=null;
+  $('account-name').textContent='';$('account-role').textContent='';
+  render();
   if (revoke && old)
     try {
       await fetch("/logout", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer " + old,
         },
         body: "{}",
       });
@@ -505,10 +513,12 @@ $("login-form").addEventListener("submit", async (event) => {
   $("login-error").textContent = "";
   try {
     const result = await api("/login", {
+      client: 'web',
       username: $("username").value.trim(),
       password: $("password").value,
     });
-    token = result.token;
+    if (!result.web_session) throw new Error('Update the MOVIS backend to enable secure browser sign-in.');
+    token = 'web-session';
     try { sessionStorage.setItem('movis-session', token); } catch {}
     await showSession(result);
   } catch (error) {
@@ -559,13 +569,13 @@ $("threshold").addEventListener("input", () => {
   } catch {}
   render();
 });
-for (const kind of ["inventory", "returns", "movements", "adjustments"])
+for (const kind of ["inventory", "returns", "movements", "adjustments", "scans"])
   $("export-" + kind).addEventListener("click", async () => {
     const button = $("export-" + kind);
     button.disabled = true;
     try {
       const response = await fetch("/reports/" + kind + "?format=csv", {
-        headers: { Authorization: "Bearer " + token },
+        headers: {},
         cache: "no-store",
       });
       if (!response.ok) {
@@ -634,8 +644,8 @@ $("edit-form").addEventListener("submit", async (event) => {
   }
 });
 async function restoreSession() {
-  try { token = sessionStorage.getItem('movis-session') || ''; } catch { return; }
-  if (!token) return;
+  let saved='';try { saved = sessionStorage.getItem('movis-session') || ''; } catch {}
+  token = 'web-session';
   try { lastActive = Number(sessionStorage.getItem('movis-last-active')) || Date.now(); } catch {}
   if (checkIdle()) return;
   $('login-button').disabled = true;
@@ -643,7 +653,7 @@ async function restoreSession() {
     const account = await api('/session');
     await showSession(account);
   } catch (error) {
-    $('login-error').textContent = error.message;
+    if (saved || token) $('login-error').textContent = error.message;
   } finally {
     $('login-button').disabled = false;
   }

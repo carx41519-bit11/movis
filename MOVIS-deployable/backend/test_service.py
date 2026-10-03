@@ -30,6 +30,50 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaises(Error):self.service.login({'username':'admin','password':'bad'})
         with self.service.connection() as con:con.execute('UPDATE sessions SET expires=0')
         with self.assertRaises(Error):self.service.auth('invalid')
+
+    def test_legacy_password_upgrade_preserves_account(self):
+        import hashlib
+        salt='0123456789abcdef'
+        legacy=salt+':'+hashlib.pbkdf2_hmac('sha256',b'test-password-123',salt.encode(),200000).hex()
+        with self.service.connection() as con:con.execute('UPDATE users SET password=? WHERE id=?',(legacy,self.user['id']))
+        result=self.service.login({'username':'admin','password':'test-password-123'})
+        self.assertEqual(self.service.auth(result['token'])['id'],self.user['id'])
+        with self.service.connection() as con:self.assertTrue(con.execute('SELECT password FROM users WHERE id=?',(self.user['id'],)).fetchone()[0].startswith('pbkdf2_sha256$600000$'))
+
+    def test_server_idle_expiry_and_old_session_compatibility(self):
+        import time
+        token=self.service.login({'username':'admin','password':'test-password-123'})['token']
+        with self.service.connection() as con:con.execute('UPDATE session_activity SET last_seen=? WHERE token=?',(time.time()-1801,token))
+        with self.assertRaises(Error):self.service.auth(token)
+        with self.service.connection() as con:
+            con.execute('DELETE FROM session_activity WHERE token=?',(token,))
+        # Pre-upgrade session rows receive activity tracking on first use.
+        self.assertEqual(self.service.auth(token)['id'],self.user['id'])
+
+    def test_rate_limit_survives_service_restart(self):
+        from service import Service
+        for _ in range(10):
+            with self.assertRaises(Error):self.service.login({'username':'missing','password':'wrong'})
+        with self.assertRaises(Error) as caught:Service(self.service.db).login({'username':'missing','password':'wrong'})
+        self.assertEqual(caught.exception.status,429)
+
+    def test_malformed_images_and_quantity_overflow_are_rejected(self):
+        for value in (None,{},'not-base64'):
+            with self.assertRaises(Error):self.service.scan(self.user,{'location_id':1,'image':value})
+        with self.assertRaises(Error):self.service.manual_adjust(self.user,{'item_id':1,'location_id':1,'quantity':2147483648,'expected_version':0,'confirmed':True,'request_key':'overflow','reason':'Invalid'})
+        self.assertEqual(self.stock()['quantity'],10)
+
+    def test_scan_cannot_switch_from_addition_to_reconciliation(self):
+        scan=self.scan()
+        self.service.add_scan(self.user,{'scan_id':scan['id'],'items':[{'item_id':1,'quantity':2}],'reason':'Receiving','confirmed':True,'request_key':'purpose-add'})
+        with self.assertRaises(Error) as caught:
+            self.service.adjust(self.user,self.adjustment(scan,item_id=2,request_key='purpose-reconcile'))
+        self.assertEqual(caught.exception.status,409)
+
+    def test_new_account_password_whitespace_is_preserved(self):
+        self.service.create_user(self.user,{'username':'spaces','password':'  passphrase-123  ','role':'viewer'})
+        self.assertEqual(self.service.login({'username':'spaces','password':'  passphrase-123  '})['role'],'viewer')
+        with self.assertRaises(Error):self.service.login({'username':'spaces','password':'passphrase-123'})
     def test_scan_is_synthetic_and_does_not_mutate_stock(self):
         before=self.stock();scan=self.scan()
         self.assertEqual(scan['mode'],'demo');self.assertIn('Synthetic',scan['warning'])

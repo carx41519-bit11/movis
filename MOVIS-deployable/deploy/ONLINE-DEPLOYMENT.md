@@ -1,3 +1,5 @@
+> Earlier setup notes. Current instructions: defense/DEPLOYMENT.md and defense/USER-GUIDE.md (0.5.0).
+
 # Deploy MOVIS without keeping your computer on
 
 This release adds PostgreSQL support and a Render Docker Blueprint. Android and

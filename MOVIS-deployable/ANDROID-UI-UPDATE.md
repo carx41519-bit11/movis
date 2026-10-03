@@ -1,3 +1,5 @@
+> Earlier setup notes. Current instructions: defense/DEPLOYMENT.md and defense/USER-GUIDE.md (0.5.0).
+
 # Android UI update — version 0.2.0
 
 The Android source now has a consistent teal-and-navy appearance matching the web monitor.

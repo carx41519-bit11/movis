@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from http.cookies import SimpleCookie, CookieError
 from service import Service, Error
 
 MAX_BODY = 9 * 1024 * 1024
@@ -24,6 +25,14 @@ class Application:
         self.attempts={}
         self.security_attempts={}
         self.lock=threading.Lock()
+
+    def request_token(self,environ):
+        auth=environ.get('HTTP_AUTHORIZATION','')
+        if auth.startswith('Bearer '):return auth[7:]
+        try:
+            cookies=SimpleCookie(environ.get('HTTP_COOKIE',''))
+            return cookies['MOVIS_SESSION'].value if 'MOVIS_SESSION' in cookies else ''
+        except CookieError:return ''
 
     def dispatch(self, environ):
         method=environ.get('REQUEST_METHOD','GET')
@@ -43,6 +52,8 @@ class Application:
                 parsed=urlsplit(origin)
                 if parsed.scheme not in ('http','https') or parsed.netloc.casefold()!=environ.get('HTTP_HOST','').casefold():
                     raise Error('Cross-site requests are not allowed',403)
+            if environ.get('HTTP_COOKIE') and not environ.get('HTTP_AUTHORIZATION') and not origin:
+                raise Error('Browser requests require a same-site origin',403)
             length=int(environ.get('CONTENT_LENGTH') or 0)
             if length<1 or length>MAX_BODY:raise Error('Invalid request size',413)
             if environ.get('CONTENT_TYPE','').split(';')[0].strip()!='application/json':raise Error('Send application/json',415)
@@ -51,23 +62,14 @@ class Application:
             data=json.loads(raw)
             if not isinstance(data,dict):raise Error('Expected a JSON object')
         if path=='/login' and method=='POST':
-            # An account-level limiter avoids depending on spoofable forwarded IP headers.
-            key=str(data.get('username','')).casefold()[:100]
-            with self.lock:
-                cutoff=time.time()-60
-                self.attempts={k:[t for t in times if t>cutoff] for k,times in self.attempts.items() if times and times[-1]>cutoff}
-                recent=self.attempts.get(key,[])
-                if len(recent)>=10 or len(self.attempts)>5000:raise Error('Too many sign-in attempts. Wait one minute.',429)
-                self.attempts[key]=recent+[time.time()]
-            return 200,self.service.login(data),'application/json'
-        user=self.service.auth(environ.get('HTTP_AUTHORIZATION','').removeprefix('Bearer '))
+            if data.get('client')=='web' and not environ.get('HTTP_ORIGIN'):
+                raise Error('Browser sign-in requires a same-site origin',403)
+            result=self.service.login(data)
+            if data.get('client')=='web':
+                result['_session_cookie']=result.pop('token');result['web_session']=True
+            return 200,result,'application/json'
+        user=self.service.auth(self.request_token(environ))
         if method=='POST' and path=='/account/security':
-            with self.lock:
-                key='security:'+str(user['id'])
-                self.security_attempts={k:v for k,v in self.security_attempts.items() if v and v[-1]>time.time()-60}
-                recent=[t for t in self.security_attempts.get(key,[]) if t>time.time()-60]
-                if len(recent)>=5:raise Error('Too many security attempts. Wait one minute.',429)
-                self.security_attempts[key]=recent+[time.time()]
             return 200,self.service.account_security(user,data),'application/json'
         if method=='GET':
             if path=='/session':return 200,user,'application/json'
@@ -89,7 +91,7 @@ class Application:
             if path.startswith('/returns/'):
                 return 200,self.service.transition(user,int(path.split('/')[-1]),data),'application/json'
             if path=='/logout':
-                with self.service.connection() as con:con.execute('DELETE FROM sessions WHERE token=?',(environ.get('HTTP_AUTHORIZATION','').removeprefix('Bearer '),))
+                with self.service.connection() as con:con.execute('DELETE FROM sessions WHERE token=?',(self.request_token(environ),))
                 return 200,{'message':'Signed out'},'application/json'
         raise Error('Endpoint not found',404)
 
@@ -105,6 +107,7 @@ class Application:
         except Exception:
             logging.exception('Request failed')
             status,result,mime=500,{'error':'Server could not complete the request'},'application/json'
+        session_cookie=result.pop('_session_cookie',None) if isinstance(result,dict) else None
         body=(json.dumps(result) if mime=='application/json' else result).encode('utf-8')
         from http import HTTPStatus
         headers=[('Content-Type',mime+'; charset=utf-8'),('Content-Length',str(len(body))),
@@ -113,6 +116,12 @@ class Application:
                  ('Permissions-Policy','camera=(self), microphone=(), geolocation=()'),
                  ('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")]
         if os.environ.get('MOVIS_HTTPS_HOSTING')=='1':headers.append(('Strict-Transport-Security','max-age=31536000'))
+        secure='; Secure' if os.environ.get('MOVIS_HTTPS_HOSTING')=='1' or environ.get('wsgi.url_scheme')=='https' else ''
+        if session_cookie:
+            headers.append(('Set-Cookie','MOVIS_SESSION='+session_cookie+'; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800'+secure))
+        elif status==401 or (status==200 and environ.get('PATH_INFO') in ('/logout','/account/security')):
+            headers.append(('Set-Cookie','MOVIS_SESSION=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'+secure))
+        if status==429:headers.append(('Retry-After','60'))
         start_response(str(status)+' '+HTTPStatus(status).phrase,headers)
         return [body]
 
@@ -127,7 +136,8 @@ def create_app():
             raise RuntimeError('Hosted service requires DATABASE_URL or an explicit persistent MOVIS_DB_PATH')
         db=Path(os.environ.get('MOVIS_DB_PATH','movis.db'))
         db.parent.mkdir(parents=True,exist_ok=True)
-    service=Service(db,os.environ.get('MOVIS_MODE','demo'),os.environ.get('MOVIS_WEIGHTS'))
+    from model_store import prepare_weights
+    service=Service(db,os.environ.get('MOVIS_MODE','demo'),prepare_weights())
     with service.connection() as con:count=con.execute('SELECT count(*) FROM users').fetchone()[0]
     if not count:
         username=os.environ.get('MOVIS_ADMIN_USERNAME','').strip()

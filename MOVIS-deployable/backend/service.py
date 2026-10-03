@@ -25,15 +25,33 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+MAX_QUANTITY = 2147483647
+SESSION_IDLE_SECONDS = 30 * 60
+
+
 def password_hash(password, salt=None):
     salt = salt or secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 200000).hex()
-    return salt + ':' + digest
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 600000).hex()
+    return 'pbkdf2_sha256$600000$' + salt + '$' + digest
+
+
+def password_matches(password, stored):
+    if not isinstance(password, str) or len(password)>500:return False
+    try:
+        if stored.startswith('pbkdf2_sha256$'):
+            _, rounds, salt, expected = stored.split('$')
+            rounds=int(rounds)
+            if rounds<200000 or rounds>2000000:return False
+        else:
+            salt, expected = stored.split(':');rounds=200000
+        digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt.encode(),rounds).hex()
+        return hmac.compare_digest(expected,digest)
+    except (ValueError,TypeError):return False
 
 
 def integer(value, minimum=0):
-    if type(value) is not int or value < minimum:
-        raise Error(f'Expected an integer of at least {minimum}')
+    if type(value) is not int or not minimum <= value <= MAX_QUANTITY:
+        raise Error(f'Expected a whole number between {minimum} and {MAX_QUANTITY}')
     return value
 
 
@@ -68,8 +86,8 @@ class Service:
             yield con
 
     def bootstrap(self, username, password, demo=False):
-        if len(password) < 10:
-            raise Error('Use a password with at least 10 characters')
+        if not isinstance(password,str) or not 12<=len(password)<=128:
+            raise Error('Use a password between 12 and 128 characters')
         with self.connection() as con:
             con.execute('BEGIN IMMEDIATE')
             if con.execute('SELECT count(*) FROM users').fetchone()[0]:
@@ -82,23 +100,49 @@ class Service:
                     con.execute('INSERT INTO stock VALUES(?,?,?,0)', (cur.lastrowid, 1, qty))
 
     def login(self, data):
+        username=data.get('username')
+        if not isinstance(username,str) or not username.strip() or len(username)>100:
+            raise Error('Invalid username or password',401)
+        self.throttle('login:'+hashlib.sha256(username.strip().casefold().encode()).hexdigest(),10)
         with self.connection() as con:
             con.execute('BEGIN IMMEDIATE')
             user = con.execute('SELECT * FROM users WHERE username=?', (data.get('username'),)).fetchone()
             password = data.get('password', '')
-            if not isinstance(password, str) or not user or not hmac.compare_digest(user['password'], password_hash(password, user['password'].split(':')[0])):
+            matches=password_matches(password,user['password'] if user else 'pbkdf2_sha256$600000$00000000000000000000000000000000$'+'0'*64)
+            if not user or not matches:
                 raise Error('Invalid username or password', 401)
+            if not user['password'].startswith('pbkdf2_sha256$600000$'):
+                con.execute('UPDATE users SET password=? WHERE id=?',(password_hash(password),user['id']))
             token = secrets.token_urlsafe(32)
             con.execute('DELETE FROM sessions WHERE expires<?', (time.time(),))
             con.execute('INSERT INTO sessions VALUES(?,?,?)', (token, user['id'], time.time() + 8*3600))
+            con.execute('INSERT INTO session_activity VALUES(?,?)',(token,time.time()))
             return {'token': token, 'role': user['role'], 'username': user['username']}
 
     def auth(self, token):
         with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
             user = con.execute('SELECT u.id,u.username,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?', (token, time.time())).fetchone()
             if not user:
                 raise Error('Please sign in again', 401)
+            active=con.execute('SELECT last_seen FROM session_activity WHERE token=?',(token,)).fetchone()
+            if active and active['last_seen'] < time.time()-SESSION_IDLE_SECONDS:
+                raise Error('Session expired after inactivity. Please sign in again',401)
+            if active:con.execute('UPDATE session_activity SET last_seen=? WHERE token=?',(time.time(),token))
+            else:con.execute('INSERT INTO session_activity VALUES(?,?)',(token,time.time()))
             return dict(user)
+
+    def throttle(self, bucket, limit, global_limit=120):
+        """Database-backed rolling rate limit survives process restarts and workers."""
+        stamp=time.time()
+        with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
+            con.execute('DELETE FROM auth_attempts WHERE attempted_at<?',(stamp-60,))
+            count=con.execute('SELECT count(*) FROM auth_attempts WHERE bucket=?',(bucket,)).fetchone()[0]
+            total=con.execute('SELECT count(*) FROM auth_attempts').fetchone()[0]
+            if count>=limit or total>=global_limit:
+                raise Error('Too many attempts. Wait one minute.',429)
+            con.execute('INSERT INTO auth_attempts(bucket,attempted_at) VALUES(?,?)',(bucket,stamp))
 
     def authorize(self, user, admin=False):
         if user['role'] not in (['admin'] if admin else ['admin', 'operator']):
@@ -113,6 +157,7 @@ class Service:
 
     def account_security(self, user, data):
         """Re-authenticate and atomically revoke every device session for this account."""
+        self.throttle('security:'+str(user['id']),5)
         current = data.get('current_password')
         action = data.get('action')
         if not isinstance(current, str) or len(current) > 500:
@@ -128,7 +173,7 @@ class Service:
         with self.connection() as con:
             con.execute('BEGIN IMMEDIATE')
             account = con.execute('SELECT * FROM users WHERE id=?', (user['id'],)).fetchone()
-            if not account or not hmac.compare_digest(account['password'], password_hash(current, account['password'].split(':')[0])):
+            if not account or not password_matches(current, account['password']):
                 raise Error('Current password is incorrect', 403)
             if action == 'change_password':
                 con.execute('UPDATE users SET password=? WHERE id=?', (password_hash(new), user['id']))
@@ -159,10 +204,10 @@ class Service:
 
     def create_user(self, user, data):
         self.authorize(user, True)
-        password = required(data, 'password')
+        password = data.get('password')
         role = data.get('role')
-        if len(password) < 10 or role not in ['admin', 'operator', 'viewer']:
-            raise Error('Use a 10-character password and a valid role')
+        if not isinstance(password,str) or not 12<=len(password)<=128 or role not in ['admin', 'operator', 'viewer']:
+            raise Error('Use a 12–128 character password and a valid role')
         with self.connection() as con:
             cur = con.execute('INSERT INTO users(username,password,role) VALUES(?,?,?)', (required(data, 'username'), password_hash(password), role))
             return {'id': cur.lastrowid}
@@ -180,7 +225,7 @@ class Service:
                 if src.width * src.height > 20000000:
                     raise Error('Photo must be at most 20 megapixels')
                 picture = ImageOps.exif_transpose(src).convert('RGB')
-        except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+        except (ValueError, TypeError, OSError, UnidentifiedImageError, Image.DecompressionBombError):
             raise Error('Invalid or unsafe image')
         started = time.perf_counter()
         with self.connection() as con:
@@ -207,9 +252,10 @@ class Service:
         scan_id = str(uuid.uuid4())
         with self.connection() as con:
             con.execute('INSERT INTO scans VALUES(?,?,?,?,?,?,?)', (scan_id, user['id'], loc, self.mode, json.dumps(detections), json.dumps(snapshot), now()))
-        return {'id': scan_id, 'mode': self.mode, 'detections': detections, 'snapshot': snapshot, 'processing_ms': round((time.perf_counter()-started)*1000, 2), 'warning': 'Synthetic sample detections; photo content was not analyzed.' if self.mode == 'demo' else 'Review and edit the detected quantities. Add only NEW incoming units, not stock already recorded.'}
+        return {'id': scan_id, 'mode': self.mode, 'detections': detections, 'snapshot': snapshot, 'processing_ms': round((time.perf_counter()-started)*1000, 2), 'warning': 'Synthetic sample detections; photo content was not analyzed.' if self.mode == 'demo' else 'Verify visible detections. Hidden stock cannot be counted reliably. Use incoming addition only for new goods; reconciliation requires a physical count of the entire item/location.'}
 
     def _change(self, con, user, item, loc, count, stock, key, digest, reason, source, scan_id=None):
+        integer(count)
         difference=count-stock['quantity']
         stamp=now()
         cur=con.execute('INSERT INTO adjustments(request_key,payload_hash,scan_id,item_id,location_id,previous_quantity,verified_quantity,difference,reason,user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (key,digest,scan_id,item,loc,stock['quantity'],count,difference,reason,user['id'],stamp))
@@ -287,6 +333,8 @@ class Service:
             scan = con.execute('SELECT * FROM scans WHERE id=?', (scan_id,)).fetchone()
             if not scan or scan['user_id'] != user['id'] or scan['location_id'] != loc:
                 raise Error('Scan does not belong to this user and location')
+            if con.execute('SELECT 1 FROM scan_commits WHERE scan_id=?',(scan_id,)).fetchone():
+                raise Error('This scan was already used to add incoming stock. Take a new scan for reconciliation.',409)
             snapshot = next((r for r in json.loads(scan['snapshot']) if r['item_id'] == item), None)
             if not snapshot:
                 raise Error('Item was not registered in this scan location')
@@ -338,6 +386,9 @@ class Service:
                 raise Error('Confirm inspection and suitability before restocking')
             stamp = now()
             if target == 'returned to available stock':
+                stock=con.execute('SELECT quantity FROM stock WHERE item_id=? AND location_id=?',(ret['item_id'],ret['location_id'])).fetchone()
+                if not stock:raise Error('Stock record not found',404)
+                integer(stock['quantity']+ret['quantity'])
                 con.execute('UPDATE stock SET quantity=quantity+?,version=version+1 WHERE item_id=? AND location_id=?', (ret['quantity'],ret['item_id'],ret['location_id']))
                 qty = con.execute('SELECT quantity FROM stock WHERE item_id=? AND location_id=?', (ret['item_id'],ret['location_id'])).fetchone()[0]
                 con.execute('INSERT INTO movements(item_id,location_id,difference,resulting_quantity,source_type,source_id,user_id,created_at) VALUES(?,?,?,?,?,?,?,?)', (ret['item_id'],ret['location_id'],ret['quantity'],qty,'return',return_id,user['id'],stamp))
@@ -351,7 +402,7 @@ class Service:
             'adjustments': 'SELECT a.*,u.username FROM adjustments a JOIN users u ON u.id=a.user_id ORDER BY a.id DESC',
             'returns': 'SELECT r.*,i.name,l.name AS location,u.username FROM returns r JOIN items i ON i.id=r.item_id JOIN locations l ON l.id=r.location_id JOIN users u ON u.id=r.user_id ORDER BY r.id DESC',
             'movements': 'SELECT m.*,i.name,l.name AS location,u.username FROM movements m JOIN items i ON i.id=m.item_id JOIN locations l ON l.id=m.location_id JOIN users u ON u.id=m.user_id ORDER BY m.id DESC',
-            'scans': 'SELECT s.*,u.username FROM scans s JOIN users u ON u.id=s.user_id ORDER BY s.created_at DESC',
+            'scans': "SELECT s.*,u.username,l.name AS location, CASE WHEN EXISTS(SELECT 1 FROM adjustments a WHERE a.scan_id=s.id) THEN 'verified and committed' ELSE 'pending review' END AS verification_status FROM scans s JOIN users u ON u.id=s.user_id JOIN locations l ON l.id=s.location_id ORDER BY s.created_at DESC",
             'return_events': 'SELECT e.*,u.username FROM return_events e JOIN users u ON u.id=e.user_id ORDER BY e.id DESC'
         }
         if kind not in queries:

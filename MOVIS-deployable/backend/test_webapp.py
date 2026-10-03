@@ -14,9 +14,12 @@ class CloudTests(unittest.TestCase):
         self.service=Service(self.db);self.service.bootstrap('cloudadmin','private-password-2026',True)
         self.app=Application(self.service)
     def tearDown(self):self.temp.cleanup()
-    def request(self,path,body=None,token=None):
+    def request(self,path,body=None,token=None,cookie=None,origin=None):
         raw=json.dumps(body).encode() if body is not None else b'';status=[]
         environ={'REQUEST_METHOD':'POST' if body is not None else 'GET','PATH_INFO':path,'CONTENT_LENGTH':str(len(raw)), 'CONTENT_TYPE':'application/json','wsgi.input':io.BytesIO(raw),'HTTP_AUTHORIZATION':'Bearer '+token if token else ''}
+        environ['HTTP_HOST']='movis.example'
+        if cookie:environ['HTTP_COOKIE']=cookie
+        if origin:environ['HTTP_ORIGIN']=origin
         output=b''.join(self.app(environ,lambda s,h:status.append((s,dict(h)))))
         return int(status[0][0].split()[0]),output,status[0][1]
     def login(self):
@@ -25,6 +28,18 @@ class CloudTests(unittest.TestCase):
         for path in ['/','/dashboard.js','/styles.css','/favicon.svg','/health']:self.assertEqual(self.request(path)[0],200)
         self.assertEqual(self.request('/inventory')[0],401)
         self.assertEqual(self.request('/../backend/schema.sql')[0],401)
+
+    def test_web_cookie_is_httponly_and_android_bearer_is_compatible(self):
+        with patch.dict(os.environ,{'MOVIS_HTTPS_HOSTING':'1'}):
+            status,body,headers=self.request('/login',{'client':'web','username':'cloudadmin','password':'private-password-2026'},origin='https://movis.example')
+        self.assertEqual(status,200);self.assertNotIn('token',json.loads(body))
+        cookie=headers['Set-Cookie'].split(';')[0]
+        for flag in ('HttpOnly','SameSite=Strict','Secure'):self.assertIn(flag,headers['Set-Cookie'])
+        self.assertEqual(self.request('/session',cookie=cookie)[0],200)
+        self.assertEqual(self.request('/logout',{},cookie=cookie)[0],403)
+        self.assertEqual(self.request('/logout',{},cookie=cookie,origin='https://movis.example')[0],200)
+        self.assertEqual(self.request('/session',cookie=cookie)[0],401)
+        token=self.login();self.assertEqual(self.request('/inventory',token=token)[0],200)
     def test_write_persists_after_restart_and_logout_revokes(self):
         token=self.login();payload={'item_id':1,'location_id':1,'quantity':15,'expected_version':0,'reason':'Online correction','confirmed':True,'request_key':'cloud-edit'}
         self.assertEqual(self.request('/manual-adjustments',payload,token)[0],200)

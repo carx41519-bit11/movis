@@ -24,25 +24,33 @@ import java.util.concurrent.*;
 
 /** Native Android capstone client. The server remains authoritative for stock and permissions. */
 public class MainActivity extends Activity {
+    private static final String CLOUD_SERVER="https://movis-1fxf.onrender.com";
     private static final int INK=Color.rgb(23,43,57), TEAL=Color.rgb(8,127,114), MUTED=Color.rgb(98,115,128), PAPER=Color.rgb(243,246,248), LINE=Color.rgb(220,228,231);
     private LinearLayout root, body, navigation, statusBox;
     private ProgressBar progress;
     private TextView dialogError;
     private final ArrayList<Button> actions=new ArrayList<>();
     private TextView message;
-    private String base="", token="", role="", username="", current="Inventory";
+    private String base=CLOUD_SERVER, token="", role="", username="", current="Inventory";
     private JSONObject inventory=new JSONObject(), scan;
     private Bitmap photo;
     private int photoLocation=-1;
+    private int scanPurpose=0;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final HashMap<String,String> pendingKeys=new HashMap<>();
     private boolean busy=false;
     interface Reply { void done(JSONObject value) throws Exception; }
     interface Work { JSONObject run() throws Exception; }
+    private static class ApiFailure extends IOException {
+        final int status;
+        ApiFailure(int status,String message){super(message);this.status=status;}
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        base=getPreferences(MODE_PRIVATE).getString("server",base);
+        // This cloud edition replaces saved local addresses from earlier installations.
+        base=CLOUD_SERVER;
+        getPreferences(MODE_PRIVATE).edit().putString("server",base).apply();
         if(state!=null) { photoLocation=state.getInt("photoLocation",-1); }
         loginScreen();
     }
@@ -91,7 +99,7 @@ public class MainActivity extends Activity {
     private void put(JSONObject data,String key,Object value) { try{data.put(key,value);}catch(JSONException e){throw new IllegalArgumentException(e);} }
     private void task(Work work,Reply reply) {
         if(busy)return; busy=true; show("Working…");
-        worker.execute(()->{try{JSONObject value=work.run();runOnUiThread(()->{busy=false;try{reply.done(value);if(!busy)show("Ready");}catch(Exception e){show(e.getMessage());}});}catch(Exception e){runOnUiThread(()->{busy=false;show(e.getMessage());});}});
+        worker.execute(()->{try{JSONObject value=work.run();runOnUiThread(()->{busy=false;try{reply.done(value);if(!busy)show("Ready");}catch(Exception e){show(e.getMessage());}});}catch(Exception e){runOnUiThread(()->{busy=false;if(e instanceof ApiFailure&&((ApiFailure)e).status==401&&!token.isEmpty()){token="";scan=null;photo=null;pendingKeys.clear();loginScreen();}show(e.getMessage());});}});
     }
     private JSONObject api(String path,JSONObject data) throws Exception {
         HttpURLConnection con=(HttpURLConnection)new URL(base+path).openConnection();
@@ -103,34 +111,36 @@ public class MainActivity extends Activity {
             String content;try(InputStream in=stream;ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] buffer=new byte[8192];int n;while((n=in.read(buffer))!=-1)out.write(buffer,0,n);content=out.toString("UTF-8");}
             if(content.trim().isEmpty())throw new IOException("The server returned an empty response (HTTP "+code+").");
             JSONObject result;try{result=new JSONObject(content);}catch(JSONException e){throw new IOException("The server returned an invalid response (HTTP "+code+"). Check its address and hosting logs.");}
-            if(code>=400)throw new IOException(result.optString("error","Server error "+code));return result;
+            if(code>=400)throw new ApiFailure(code,result.optString("error","Server error "+code));return result;
+        } catch(SocketTimeoutException e) {
+            throw new IOException("The hosted server took too long to respond. It may be waking up. "+(data!=null&&!path.equals("/login")?"The change may have been saved. Refresh inventory before retrying; keep the same quantities and reason for a safe retry.":"Wait a minute and try again."));
+        } catch(UnknownHostException|ConnectException e) {
+            throw new IOException("Cannot reach MOVIS cloud. Check Wi-Fi or mobile data and try again.");
         } finally {con.disconnect();}
     }
     private void loginScreen() {
-        shell("Warehouse inventory");
+        shell("Online warehouse inventory");
         TextView eyebrow=heading("YOUR WAREHOUSE, CONNECTED",12);eyebrow.setTextColor(TEAL);eyebrow.setPadding(0,dp(22),0,dp(4));body.addView(eyebrow);title("Welcome to MOVIS");note("Sign in to check stock, add items from a photo, and track returned goods.");
         LinearLayout form=card(body);form.addView(heading("Sign in",21));
         EditText user=field(form,"Username",false);user.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_NORMAL);user.setText(getPreferences(MODE_PRIVATE).getString("username",""));
         EditText password=field(form,"Password",false);password.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
         CheckBox reveal=new CheckBox(this);reveal.setText("Show password");reveal.setTextSize(14);reveal.setTextColor(MUTED);reveal.setButtonTintList(ColorStateList.valueOf(TEAL));form.addView(reveal);reveal.setOnCheckedChangeListener((b,on)->{int pos=password.getSelectionStart();password.setInputType(InputType.TYPE_CLASS_TEXT|(on?InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD:InputType.TYPE_TEXT_VARIATION_PASSWORD));password.setTypeface(Typeface.DEFAULT);password.setSelection(Math.max(0,pos));});
-        EditText server=field(form,"Server address",false);server.setText(base);server.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);
-        TextView help=text("For online access, enter your deployed HTTPS address. A free server may take a minute to wake up. For local testing, use your computer's Wi-Fi address and port 8080.",14);help.setTextColor(MUTED);help.setVisibility(View.GONE);
-        TextView helpLink=text("How do I connect?",14);helpLink.setTextColor(TEAL);helpLink.setPadding(0,dp(10),0,dp(10));form.addView(helpLink);form.addView(help);helpLink.setOnClickListener(v->help.setVisibility(help.getVisibility()==View.GONE?View.VISIBLE:View.GONE));
+        TextView cloud=text("Connected to MOVIS cloud\n"+CLOUD_SERVER,14);cloud.setTextColor(TEAL);form.addView(cloud);
+        TextView help=text("Use the administrator account created for your hosted system, or an account your administrator has added. Internet is required. The server may take a minute to wake up after inactivity.",14);help.setTextColor(MUTED);help.setVisibility(View.GONE);
+        TextView helpLink=text("Sign-in help",14);helpLink.setTextColor(TEAL);helpLink.setPadding(0,dp(10),0,dp(10));form.addView(helpLink);form.addView(help);helpLink.setOnClickListener(v->help.setVisibility(help.getVisibility()==View.GONE?View.VISIBLE:View.GONE));
         button(form,"Sign in",()->{
-            String userValue=user.getText().toString().trim(),passwordValue=password.getText().toString();base=server.getText().toString().trim().replaceAll("/+$","");
+            String userValue=user.getText().toString().trim(),passwordValue=password.getText().toString();base=CLOUD_SERVER;
             if(userValue.isEmpty()){user.setError("Enter your username");user.requestFocus();return;}if(passwordValue.isEmpty()){password.setError("Enter your password");password.requestFocus();return;}
-            if(!base.startsWith("https://")&&!base.startsWith("http://")){server.setError("Include http:// or https://");server.requestFocus();return;}
-            if(!base.startsWith("https://")&&(getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE)==0){server.setError("The release app requires an HTTPS server address");server.requestFocus();return;}
             task(()->api("/login",obj("username",userValue,"password",passwordValue)),r->{token=r.getString("token");role=r.getString("role");username=r.getString("username");getPreferences(MODE_PRIVATE).edit().putString("server",base).putString("username",username).apply();((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(password.getWindowToken(),0);loadInventory();});
         });
-        note("Your phone and web dashboard use the same warehouse records.");
+        note("Use Wi-Fi or mobile data. Your phone and web dashboard share the same inventory; your computer can be switched off.");
     }
     private void loadInventory() { task(()->api("/inventory",null),r->{inventory=r;home(current);}); }
     private boolean canWrite() { return role.equals("admin")||role.equals("operator"); }
     private void home(String tab) {
         current=tab;shell(username+" · "+(role.equals("admin")?"Administrator":role.equals("operator")?"Operator":"Viewer"));
         LinearLayout row=new LinearLayout(this);row.setBackgroundColor(Color.WHITE);row.setPadding(dp(6),dp(8),dp(6),dp(8));navigation.addView(row);
-        for(String page:new String[]{"Inventory","Scan","Returns","Reports"}) {LinearLayout item=column();item.setGravity(Gravity.CENTER);boolean selected=page.equals(tab);item.setBackground(surface(selected?Color.rgb(226,242,238):Color.WHITE,12,0));item.addView(new NavIcon(page,selected?TEAL:MUTED),new LinearLayout.LayoutParams(dp(24),dp(24)));TextView label=text(page.equals("Scan")?"Photo":page,14);label.setTextColor(selected?TEAL:MUTED);label.setTypeface(Typeface.DEFAULT,selected?Typeface.BOLD:Typeface.NORMAL);item.addView(label);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(66),1);lp.leftMargin=dp(2);lp.rightMargin=dp(2);row.addView(item,lp);item.setContentDescription(page.equals("Scan")?"Photo scan":page);item.setOnClickListener(v->{if(!busy)home(page);});}
+        for(String page:new String[]{"Inventory","Scan","Returns","Reports"}) {LinearLayout item=column();item.setGravity(Gravity.CENTER);boolean selected=page.equals(tab);item.setBackground(surface(selected?Color.rgb(226,242,238):Color.WHITE,12,0));item.addView(new NavIcon(page,selected?TEAL:MUTED),new LinearLayout.LayoutParams(dp(24),dp(24)));TextView label=text(page.equals("Scan")?"Photo":page,14);label.setTextColor(selected?TEAL:MUTED);label.setTypeface(Typeface.DEFAULT,selected?Typeface.BOLD:Typeface.NORMAL);item.addView(label);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(66),1);lp.leftMargin=dp(2);lp.rightMargin=dp(2);row.addView(item,lp);item.setContentDescription(page.equals("Scan")?"Photo scan":page);item.setOnClickListener(v->{if(!busy){if(page.equals("Inventory")){current=page;loadInventory();}else home(page);}});}
         if(inventory.optString("mode").equals("demo"))banner("Demo mode · Photo detections are samples until a trained model is connected.");
         switch(tab){case "Scan":scanScreen();break;case "Returns":returnsScreen();break;case "Reports":reportsScreen();break;case "Manage":manageScreen();break;default:inventoryScreen();}
     }
@@ -143,7 +153,7 @@ public class MainActivity extends Activity {
     private int selected(Spinner spinner,JSONArray values){int p=spinner.getSelectedItemPosition();if(p<0||p>=values.length())throw new IllegalArgumentException("Create an item and location first");return values.optJSONObject(p).optInt("id");}
     private String retryKey(String kind,JSONObject payload){String signature=kind+payload.toString();if(!pendingKeys.containsKey(signature))pendingKeys.put(signature,UUID.randomUUID().toString());return pendingKeys.get(signature);}
     private void inventoryScreen() {
-        title("Inventory");note("Available stock across your warehouse locations.");JSONArray stock=array("stock");int units=0;for(int i=0;i<stock.length();i++)units+=stock.optJSONObject(i).optInt("quantity");
+        title("Inventory");note("Available stock across your warehouse locations.");JSONArray stock=array("stock");long units=0;for(int i=0;i<stock.length();i++)units+=stock.optJSONObject(i).optInt("quantity");
         LinearLayout totals=new LinearLayout(this);body.addView(totals);for(int i=0;i<2;i++){LinearLayout stat=column();stat.setPadding(dp(16),dp(14),dp(16),dp(14));stat.setBackground(surface(i==0?TEAL:Color.WHITE,14,i==0?0:LINE));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-2,1);if(i==0)lp.rightMargin=dp(10);totals.addView(stat,lp);TextView count=heading(String.valueOf(i==0?units:array("items").length()),28);count.setTextColor(i==0?Color.WHITE:INK);TextView label=text(i==0?"Available units":"Products",14);label.setTextColor(i==0?Color.rgb(202,238,228):MUTED);stat.addView(count);stat.addView(label);}
         section("Stock by item");
         if(stock.length()==0){LinearLayout empty=card(body);empty.addView(heading("No stock yet",18));empty.addView(text(role.equals("admin")?"Open the account menu to create items and locations in Manage warehouse.":"Ask your administrator to register items and stock locations.",14));}
@@ -162,10 +172,14 @@ public class MainActivity extends Activity {
         }catch(Exception e){show("Enter a valid whole-number quantity");}}));dialog.show();
     }
     private void scanScreen() {
-        title("Add from a photo");if(!canWrite()){note("Your role can view inventory and reports.");return;}
-        JSONArray locations=array("locations");Spinner location=selector(body,locations,"Add stock to location");
+        final boolean reconcile=scanPurpose==1;
+        title(reconcile?"Verify a complete count":"Add incoming goods");if(!canWrite()){note("Your role can view inventory and reports.");return;}
+        LinearLayout purposes=new LinearLayout(this);body.addView(purposes);
+        button(purposes,"Incoming goods",()->{scanPurpose=0;scan=null;photo=null;home("Scan");});
+        button(purposes,"Complete count",()->{scanPurpose=1;scan=null;photo=null;home("Scan");});
+        JSONArray locations=array("locations");Spinner location=selector(body,locations,reconcile?"Count at location":"Add stock to location");
         for(int i=0;i<locations.length();i++)if(locations.optJSONObject(i).optInt("id")==photoLocation)location.setSelection(i);
-        note("Take a photo of incoming goods, review the quantities, then add or discard. Add only items not already recorded.");
+        note(reconcile?"Count ALL units for the selected item and location, including those outside the photograph. Visible detections are only a starting point. Hidden stock cannot be counted reliably.":"Take a photo of incoming goods, review the quantities, then add or discard. Add only items not already recorded.");
         LinearLayout photoActions=new LinearLayout(this);body.addView(photoActions);
         button(photoActions,"Take photo",()->{photoLocation=selected(location,locations);scan=null;photo=null;Intent intent=new Intent(MediaStore.ACTION_IMAGE_CAPTURE);Uri uri=Uri.parse("content://com.movis.warehouse.photos/capture.jpg");intent.putExtra(MediaStore.EXTRA_OUTPUT,uri);intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_READ_URI_PERMISSION);intent.setClipData(android.content.ClipData.newRawUri("MOVIS photo",uri));startActivityForResult(intent,101);});
         button(photoActions,"Choose photo",()->{photoLocation=selected(location,locations);scan=null;photo=null;Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.setType("image/*");intent.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(intent,102);});
@@ -185,11 +199,12 @@ public class MainActivity extends Activity {
             for(int i=0;i<snapshot.length();i++){JSONObject stock=snapshot.optJSONObject(i);int item=stock.optInt("item_id");String name="Item "+item;
                 for(int j=0;j<array("items").length();j++)if(array("items").optJSONObject(j).optInt("id")==item)name=array("items").optJSONObject(j).optString("name");
                 LinearLayout itemCard=card(body);CheckBox select=new CheckBox(this);select.setText(name);select.setTextSize(17);select.setTypeface(Typeface.DEFAULT,Typeface.BOLD);select.setButtonTintList(ColorStateList.valueOf(TEAL));select.setChecked(counts.getOrDefault(item,0)>0);itemCard.addView(select);TextView available=text(stock.optInt("quantity")+" currently available · "+counts.getOrDefault(item,0)+" detected",14);available.setTextColor(MUTED);itemCard.addView(available);
-                EditText count=field(itemCard,"Quantity to add",true);count.setText(String.valueOf(counts.getOrDefault(item,0)));
+                EditText count=reconcile?new EditText(this):field(itemCard,"Quantity to add",true);count.setText(String.valueOf(counts.getOrDefault(item,0)));
+                if(reconcile){count.setVisibility(View.GONE);select.setVisibility(View.GONE);button(itemCard,"Verify complete count for "+name,()->reconcileItem(stock,counts.getOrDefault(item,0)));}
                 itemIds.add(item);quantities.add(count);selectedItems.add(select);
             }
-            note("Select only the incoming items you want to add. You can correct missed detections or exclude incorrect ones. Unmapped classes must first be registered by an administrator.");
-            EditText reason=field(body,"Reason / receipt reference",false);
+            note(reconcile?"Choose one item to reconcile. The new total is saved only after you verify a complete physical count and review the difference.":"Select only the incoming items you want to add. You can correct missed detections or exclude incorrect ones. Unmapped classes must first be registered by an administrator.");
+            if(!reconcile){EditText reason=field(body,"Reason / receipt reference",false);
             button(body,"Add selected items to inventory",()->{
                 JSONArray lines=new JSONArray();int total=0;
                 for(int i=0;i<itemIds.size();i++)if(selectedItems.get(i).isChecked()){int qty=Integer.parseInt(quantities.get(i).getText().toString());if(qty<1){show("Selected quantities must be at least 1");return;}lines.put(obj("item_id",itemIds.get(i),"quantity",qty));total+=qty;}
@@ -198,13 +213,39 @@ public class MainActivity extends Activity {
                 JSONObject payload=obj("scan_id",scan.optString("id"),"items",lines,"reason",why,"confirmed",true);put(payload,"request_key",retryKey("photo-add",payload));
                 new AlertDialog.Builder(this).setTitle("Add incoming stock?").setMessage("Add "+total+" new units across "+lines.length()+" selected items? Existing stock will increase by these quantities.").setNegativeButton("Cancel",null).setPositiveButton("Add to inventory",(d,w)->task(()->api("/scan-additions",payload),r->{scan=null;photo=null;loadInventory();})).show();
             });
-            button(body,"Discard — do not add",()->{scan=null;photo=null;home("Scan");});
+            }
+            button(body,"Discard — do not save",()->{scan=null;photo=null;home("Scan");});
         }
+    }
+    private void reconcileItem(JSONObject stock,int detected) {
+        LinearLayout form=column();form.setPadding(dp(18),dp(8),dp(18),dp(8));
+        form.addView(text("Recorded quantity: "+stock.optInt("quantity")+". Visible detections: "+detected+". Count the entire selected item/location before confirming.",15));
+        EditText count=field(form,"Verified TOTAL quantity",true);count.setText(String.valueOf(detected));
+        EditText reason=field(form,"Adjustment reason",false);
+        CheckBox complete=new CheckBox(this);complete.setText("I physically checked the ENTIRE item/location, including units outside the photo.");form.addView(complete);
+        dialogError=text("",14);dialogError.setTextColor(Color.rgb(157,58,43));form.addView(dialogError);
+        final String scanId=scan.optString("id");
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Verify full stock count").setView(form).setNegativeButton("Cancel",null).setPositiveButton("Review adjustment",null).create();
+        dialog.setOnDismissListener(v->dialogError=null);
+        dialog.setOnShowListener(v->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(x->{try{
+            int qty=Integer.parseInt(count.getText().toString());String why=reason.getText().toString().trim();
+            if(qty<0||why.isEmpty()||!complete.isChecked()){show("Enter a quantity and reason, and confirm a complete physical count.");return;}
+            JSONObject payload=obj("item_id",stock.optInt("item_id"),"location_id",photoLocation,"verified_quantity",qty,"scan_id",scanId,"reason",why,"confirmed",true,"complete_location_count",true);put(payload,"request_key",retryKey("reconcile",payload));
+            new AlertDialog.Builder(this).setTitle("Confirm stock adjustment").setMessage("Previous: "+stock.optInt("quantity")+"\nVerified: "+qty+"\nDifference: "+(qty-stock.optInt("quantity"))+"\nSave this verified total?").setNegativeButton("Cancel",null).setPositiveButton("Save adjustment",(d,w)->task(()->api("/adjustments",payload),r->{dialog.dismiss();scan=null;photo=null;loadInventory();})).show();
+        }catch(NumberFormatException e){show("Enter a valid whole-number quantity");}}));dialog.show();
     }
     @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(result!=RESULT_OK)return;
         try{Uri uri=request==101?Uri.parse("content://com.movis.warehouse.photos/capture.jpg"):data.getData();
-            task(()->{BitmapFactory.Options options=new BitmapFactory.Options();options.inJustDecodeBounds=true;try(InputStream in=getContentResolver().openInputStream(uri)){BitmapFactory.decodeStream(in,null,options);}if(options.outWidth<=0)throw new IOException("Unsupported photo");options.inSampleSize=1;while(Math.max(options.outWidth,options.outHeight)/options.inSampleSize>1600)options.inSampleSize*=2;options.inJustDecodeBounds=false;try(InputStream in=getContentResolver().openInputStream(uri)){photo=BitmapFactory.decodeStream(in,null,options);}if(photo==null)throw new IOException("Unable to decode photo");return obj();},r->{if(!token.isEmpty())home("Scan");});
+            task(()->{BitmapFactory.Options options=new BitmapFactory.Options();options.inJustDecodeBounds=true;try(InputStream in=getContentResolver().openInputStream(uri)){BitmapFactory.decodeStream(in,null,options);}if(options.outWidth<=0)throw new IOException("Unsupported photo");options.inSampleSize=1;while(Math.max(options.outWidth,options.outHeight)/options.inSampleSize>1600)options.inSampleSize*=2;options.inJustDecodeBounds=false;try(InputStream in=getContentResolver().openInputStream(uri)){photo=BitmapFactory.decodeStream(in,null,options);}if(photo==null)throw new IOException("Unable to decode photo");orientPhoto(uri);return obj();},r->{if(!token.isEmpty())home("Scan");});
         }catch(Exception e){show(e.getMessage());}
+    }
+    private void orientPhoto(Uri uri) throws IOException {
+        int orientation=1;
+        try(InputStream in=getContentResolver().openInputStream(uri)){orientation=new android.media.ExifInterface(in).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION,1);}catch(IOException ignored){}
+        Matrix matrix=new Matrix();
+        switch(orientation){case 2:matrix.setScale(-1,1);break;case 3:matrix.setRotate(180);break;case 4:matrix.setScale(1,-1);break;case 5:matrix.setRotate(90);matrix.postScale(-1,1);break;case 6:matrix.setRotate(90);break;case 7:matrix.setRotate(-90);matrix.postScale(-1,1);break;case 8:matrix.setRotate(-90);break;default:return;}
+        Bitmap oriented=Bitmap.createBitmap(photo,0,0,photo.getWidth(),photo.getHeight(),matrix,true);
+        if(oriented!=photo){photo.recycle();photo=oriented;}
     }
     private void returnsScreen() {
         title("Returns");note("Track returned goods from inspection to restocking.");
@@ -247,7 +288,7 @@ public class MainActivity extends Activity {
         section("Register stock");
         Spinner items=selector(body,array("items"),"Register stock item"),locations=selector(body,array("locations"),"Register stock location");button(body,"Register zero-stock record",()->task(()->api("/catalog",obj("kind","stock","item_id",selected(items,array("items")),"location_id",selected(locations,array("locations")))),r->loadInventory()));
         section("User accounts");
-        EditText user=field(body,"New username",false),password=field(body,"New password (10+ characters)",false);password.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText user=field(body,"New username",false),password=field(body,"New password (12–128 characters)",false);password.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
         Spinner roles=new Spinner(this);roles.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"operator","viewer","admin"}));body.addView(roles);button(body,"Create user",()->task(()->api("/users",obj("username",user.getText().toString(),"password",password.getText().toString(),"role",roles.getSelectedItem().toString())),r->home("Manage")));
     }
     private class NavIcon extends View {

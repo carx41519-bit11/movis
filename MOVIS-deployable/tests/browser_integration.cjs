@@ -1,0 +1,43 @@
+const {chromium}=require('playwright');
+const fs=require('fs'),assert=require('assert');
+(async()=>{
+ const fixture=JSON.parse(fs.readFileSync('.work/browser-fixture.json'));
+ const browser=await chromium.launch({headless:true,...(process.env.BROWSER_CHANNEL?{channel:process.env.BROWSER_CHANNEL}:{})});
+ try {
+  const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  const base='http://127.0.0.1:8088';
+  await page.goto(base);await page.locator('#login-button').waitFor({state:'visible'});
+  await page.locator('#username').fill(fixture.accounts.admin.username);await page.locator('#password').fill(fixture.accounts.admin.password);await page.locator('#login-button').click();await page.locator('#total-units').filter({hasText:'18'}).waitFor();
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('movis-session')),'web-session');
+  assert(!(await page.evaluate(()=>document.cookie)).includes('MOVIS_SESSION'));
+  assert((await context.cookies()).find(c=>c.name==='MOVIS_SESSION').httpOnly);
+  await page.reload();await page.locator('#app').waitFor({state:'visible'});
+  const device=await browser.newContext();
+  const login=await device.request.post(base+'/login',{data:fixture.accounts.operator});assert(login.ok());const android=(await login.json()).token;
+  const post=async(path,data)=>{const r=await device.request.post(base+path,{headers:{Authorization:'Bearer '+android},data});assert(r.ok(),await r.text());return r.json();};
+  const scan=await post('/scans',{location_id:1,image:fixture.image});assert.equal(scan.mode,'demo');
+  const addition={scan_id:scan.id,items:[{item_id:1,quantity:2}],confirmed:true,request_key:'android-add-defense',reason:'Synthetic workflow test'};
+  await post('/scan-additions',addition);await post('/scan-additions',addition);
+  await page.locator('#refresh').click();await page.locator('#total-units').filter({hasText:'20'}).waitFor();
+  const ret=await post('/returns',{item_id:1,location_id:1,quantity:3,reason:'Workflow test return',request_key:'android-return-defense'});
+  await post('/returns/'+ret.id,{status:'accepted'});await post('/returns/'+ret.id,{status:'returned to available stock',confirmed_suitable:true});await post('/returns/'+ret.id,{status:'returned to available stock',confirmed_suitable:true});
+  const countScan=await post('/scans',{location_id:1,image:fixture.image});
+  const count={scan_id:countScan.id,item_id:1,location_id:1,verified_quantity:11,complete_location_count:true,confirmed:true,reason:'Complete physical test count',request_key:'android-reconcile-defense'};
+  const adjustment=await post('/adjustments',count);assert.equal(adjustment.previous_quantity,15);assert.equal(adjustment.difference,-4);await post('/adjustments',count);
+  await page.locator('#refresh').click();await page.locator('#total-units').filter({hasText:'19'}).waitFor();
+  await page.locator('[data-page="activity"]').first().click();await page.locator('#scan-history-table').getByText('verified and committed').first().waitFor();
+  assert.equal(await page.locator('[data-page="scan"], input[type="file"]').count(),0);
+  fs.mkdirSync('.work',{recursive:true});
+  await page.screenshot({path:'.work/activity-preview.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});await page.locator('[data-page="inventory"]').click();
+  await page.screenshot({path:'.work/mobile-preview.png',fullPage:true});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  const readerLogin=await device.request.post(base+'/login',{data:fixture.accounts.viewer}),reader=(await readerLogin.json()).token;
+  const denied=await context.request.post(base+'/manual-adjustments',{headers:{Authorization:'Bearer '+reader},data:{}});assert.equal(denied.status(),403);
+  await page.locator('[data-page="security"]').click();await page.locator('#security-current').fill(fixture.accounts.admin.password);await page.locator('#security-new').fill('new-defense-test-password');await page.locator('#security-confirm').fill('new-defense-test-password');await page.locator('#change-password').click();await page.locator('#login-view').waitFor({state:'visible'});
+  assert(!(await context.cookies()).some(c=>c.name==='MOVIS_SESSION'));
+  assert.equal((await context.request.get(base+'/inventory')).status(),401);
+  assert.deepEqual(errors,[]);
+  console.log('PASS real local WSGI: HttpOnly sign-in/refresh, Android-style bearer scan-addition retries, return restock once, complete count difference/history, viewer denial, cookie revocation and mobile layout. Synthetic detections only.');
+ } finally {await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});
