@@ -12,6 +12,7 @@ let state = {
   adjustments: [],
 };
 const names = {
+  security: ["ACCOUNT SECURITY", "Protect your workspace"],
   scan: ["PHOTO SCAN", "Add inventory from a photo"],
   overview: ["OVERVIEW", "Inventory at a glance"],
   inventory: ["INVENTORY", "Inventory register"],
@@ -469,6 +470,8 @@ function page(key) {
 async function signOut(revoke = true) {
   const old = token;
   try { sessionStorage.removeItem('movis-session'); } catch {}
+  try { sessionStorage.removeItem('movis-last-active'); } catch {}
+  $('security-form').reset();
   token = "";
   role = "";
   resetPhoto();
@@ -518,6 +521,7 @@ $("login-form").addEventListener("submit", async (event) => {
   }
 });
 async function showSession(result) {
+    touchSession();
     role = result.role;
     document.querySelectorAll('[data-page="scan"]').forEach(button => {
       button.hidden = role === "viewer";
@@ -876,6 +880,8 @@ $("scan-review").addEventListener("submit", async (event) => {
 async function restoreSession() {
   try { token = sessionStorage.getItem('movis-session') || ''; } catch { return; }
   if (!token) return;
+  try { lastActive = Number(sessionStorage.getItem('movis-last-active')) || Date.now(); } catch {}
+  if (checkIdle()) return;
   $('login-button').disabled = true;
   try {
     const account = await api('/session');
@@ -886,4 +892,42 @@ async function restoreSession() {
     $('login-button').disabled = false;
   }
 }
+
+const IDLE_LIMIT = 15 * 60 * 1000;
+let lastActive = Date.now();
+function touchSession() {
+  lastActive = Date.now();
+  if (token) try { sessionStorage.setItem('movis-last-active', String(lastActive)); } catch {}
+}
+function checkIdle() {
+  if (token && Date.now() - lastActive >= IDLE_LIMIT) {
+    signOut();
+    $('login-error').textContent = 'Signed out after 15 minutes of inactivity. Sign in to continue.';
+    return true;
+  }
+  return false;
+}
+for (const event of ['pointerdown', 'keydown', 'touchstart', 'wheel'])
+  document.addEventListener(event, () => { if (!checkIdle()) touchSession(); }, { passive: true });
+document.addEventListener('pointermove', () => { if (!checkIdle() && Date.now()-lastActive>10000) touchSession(); }, { passive: true });
+setInterval(checkIdle, 10000);
+document.addEventListener('visibilitychange', checkIdle);
+async function secureAccount(action) {
+  const current = $('security-current').value, password = $('security-new').value;
+  $('security-error').textContent = '';
+  if (!current) { $('security-current').reportValidity(); return; }
+  if (action === 'change_password' && (password.length < 12 || password.length > 128 || password !== $('security-confirm').value)) {
+    $('security-error').textContent = 'Use 12–128 characters and make sure the new passwords match.'; return;
+  }
+  if (action === 'revoke_sessions' && !confirm('Sign out this browser and every device using your account?')) return;
+  $('change-password').disabled = $('revoke-sessions').disabled = true;
+  try {
+    const result = await api('/account/security', { action, current_password: current, new_password: password });
+    await signOut(false);
+    $('login-error').textContent = result.message;
+  } catch (error) { $('security-error').textContent = error.message; }
+  finally { $('change-password').disabled = $('revoke-sessions').disabled = false; }
+}
+$('security-form').addEventListener('submit', event => { event.preventDefault(); secureAccount('change_password'); });
+$('revoke-sessions').addEventListener('click', () => secureAccount('revoke_sessions'));
 restoreSession();

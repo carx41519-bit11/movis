@@ -24,7 +24,7 @@
             alongside your Android scanner.
           </p>
         </div>
-        <p class="login-foot">Inventory monitor / 01</p>
+        <div class="login-foot">PHOTO SCANNING · INVENTORY · RETURNS<br />One warehouse. A shared source of stock records.</div>
       </div>
       <div class="login-panel">
         <form id="login-form">
@@ -61,11 +61,15 @@
           <button class="nav active" data-page="overview">
             <span aria-hidden="true">◫</span>Overview</button
           ><button class="nav" data-page="inventory">
-            <span aria-hidden="true">▦</span>Inventory</butto>
-          ><button class="nav" data-page="returns">
+            <span aria-hidden="true">▦</span>Inventory</button
+          ><button class="nav" data-page="scan"><span aria-hidden="true">▣</span>Photo scan</button>
+          <button class="nav" data-page="returns">
             <span aria-hidden="true">↺</span>Returns</button
           ><button class="nav" data-page="activity">
             <span aria-hidden="true">≡</span>Stock activity
+          </button>
+          <button class="nav" data-page="security">
+            <span aria-hidden="true">◇</span>Account security
           </button>
         </nav>
         <div class="sidebar-bottom">
@@ -328,6 +332,33 @@
               <p id="scan-error" class="error" role="alert"></p>
             </form>
           </article>
+        </section>
+        <section id="security-page" class="page" hidden>
+          <div class="security-grid">
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">YOUR ACCOUNT</p><h2>Password &amp; device access</h2></div><span class="tag">Private</span></div>
+              <p class="muted">Confirm your current password to protect your account. Either action signs out this browser and all Android devices using your account.</p>
+              <form id="security-form">
+                <label for="security-current">Current password</label>
+                <input id="security-current" type="password" autocomplete="current-password" required maxlength="500" />
+                <label for="security-new">New password</label>
+                <input id="security-new" type="password" autocomplete="new-password" minlength="12" maxlength="128" />
+                <label for="security-confirm">Confirm new password</label>
+                <input id="security-confirm" type="password" autocomplete="new-password" maxlength="128" />
+                <p class="muted">Use 12–128 characters. A unique passphrase is easier to remember.</p>
+                <div class="scan-actions"><button class="primary" id="change-password" type="submit">Update password</button><button class="secondary" id="revoke-sessions" type="button">Sign out all devices</button></div>
+                <p id="security-error" class="error" role="alert"></p>
+              </form>
+            </article>
+            <article class="panel security-guide">
+              <p class="eyebrow">ACCESS &amp; ACCOUNTABILITY</p><h2>Use the right level of access</h2>
+              <div class="security-item"><strong>Administrator</strong><p>Manage items, locations and personnel. Give this role only to warehouse managers.</p></div>
+              <div class="security-item"><strong>Operator</strong><p>Scan photos, confirm stock changes and process returns.</p></div>
+              <div class="security-item"><strong>Viewer</strong><p>Monitor inventory and reports without changing stock.</p></div>
+              <div class="security-item"><strong>Shared computer protection</strong><p>This dashboard signs out after 15 minutes without keyboard, pointer or touch activity. Sessions also expire on the server after eight hours.</p></div>
+              <p class="panel-foot">Use individual accounts so the stock history identifies who made each change.</p>
+            </article>
+          </div>
         </section>
         <footer>
           <span>MOVIS / Warehouse inventory system</span
