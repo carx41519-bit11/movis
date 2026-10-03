@@ -1,0 +1,8 @@
+# Copy to dataset.yaml and replace every REPLACE value with real warehouse classes.
+path: ./warehouse_dataset
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: REPLACE_WITH_ITEM_CLASS
+  1: REPLACE_WITH_SECOND_ITEM_CLASS
