@@ -13,7 +13,6 @@ let state = {
 };
 const names = {
   security: ["ACCOUNT SECURITY", "Protect your workspace"],
-  scan: ["PHOTO SCAN", "Add inventory from a photo"],
   overview: ["OVERVIEW", "Inventory at a glance"],
   inventory: ["INVENTORY", "Inventory register"],
   returns: ["RETURNS", "Return monitoring"],
@@ -94,7 +93,7 @@ function table(target, headers, rows, emptyTitle, emptyDetail) {
 }
 async function api(path, body) {
   const controller = new AbortController(),
-    timeout = setTimeout(() => controller.abort(), path === '/scans' ? 120000 : 90000);
+    timeout = setTimeout(() => controller.abort(), 90000);
   const uncertainWrite =
     body !== undefined && path !== "/login"
       ? " The change may have been saved. Refresh inventory before submitting again."
@@ -234,7 +233,6 @@ function render() {
     format.format(pending.reduce((sum, r) => sum + r.quantity, 0)) +
     " returned units awaiting inspection";
   $("demo-banner").hidden = inv.mode !== "demo";
-  updateScanLocations();
   const current = $("location-filter").value;
   clear("location-filter").append(new Option("All locations", ""));
   for (const loc of inv.locations)
@@ -474,7 +472,6 @@ async function signOut(revoke = true) {
   $('security-form').reset();
   token = "";
   role = "";
-  resetPhoto();
   if ($("edit-dialog").open) $("edit-dialog").close();
   generation++;
   loading = false;
@@ -523,9 +520,6 @@ $("login-form").addEventListener("submit", async (event) => {
 async function showSession(result) {
     touchSession();
     role = result.role;
-    document.querySelectorAll('[data-page="scan"]').forEach(button => {
-      button.hidden = role === "viewer";
-    });
     generation++;
     $("password").value = "";
     $("account-name").textContent = result.username;
@@ -596,13 +590,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refresh();
 });
 $("logout-mobile").addEventListener("click", () => signOut());
-let editing = null,
-  editKey = null,
-  photoImage = null,
-  photoData = "",
-  photoScan = null,
-  photoKey = null,
-  photoBusy = false;
+let editing = null, editKey = null;
 function openEdit(stock) {
   editing = { ...stock };
   editKey = crypto.randomUUID();
@@ -645,238 +633,6 @@ $("edit-form").addEventListener("submit", async (event) => {
     $("edit-save").disabled = false;
   }
 });
-function updateScanLocations() {
-  const selected = $("scan-location").value;
-  clear("scan-location");
-  for (const loc of state.inventory.locations)
-    $("scan-location").append(new Option(loc.name, String(loc.id)));
-  if (state.inventory.locations.some((l) => String(l.id) === selected))
-    $("scan-location").value = selected;
-}
-function resetPhoto() {
-  photoImage = null;
-  photoData = "";
-  photoScan = null;
-  photoKey = null;
-  $("scan-photo").value = "";
-  $("scan-canvas").hidden = true;
-  $("scan-review").hidden = true;
-  $("analyze-photo").disabled = true;
-  $("scan-message").textContent = "";
-  $("scan-error").textContent = "";
-}
-function drawPhoto(detections = []) {
-  if (!photoImage) return;
-  const canvas = $("scan-canvas");
-  canvas.width = photoImage.width;
-  canvas.height = photoImage.height;
-  const context = canvas.getContext("2d");
-  context.drawImage(photoImage, 0, 0);
-  context.strokeStyle = "#00b69c";
-  context.fillStyle = "#00b69c";
-  context.lineWidth = Math.max(2, canvas.width / 400);
-  context.font = Math.max(14, canvas.width / 65) + "px system-ui";
-  for (const d of detections) {
-    const [x, y, r, b] = d.box;
-    context.strokeRect(
-      x * canvas.width,
-      y * canvas.height,
-      (r - x) * canvas.width,
-      (b - y) * canvas.height,
-    );
-    context.fillText(
-      d.name + " " + Math.round(d.confidence * 100) + "%",
-      x * canvas.width,
-      Math.max(20, y * canvas.height - 6),
-    );
-  }
-  canvas.hidden = false;
-}
-$("scan-photo").addEventListener("change", async () => {
-  if (photoBusy) return;
-  const file = $("scan-photo").files[0];
-  photoScan = null;
-  photoKey = null;
-  $("scan-review").hidden = true;
-  $("scan-error").textContent = "";
-  if (!file) return resetPhoto();
-  if (file.size > 20 * 1024 * 1024) {
-    resetPhoto();
-    $("scan-message").textContent = "Choose a photo smaller than 20 MB.";
-    return;
-  }
-  photoBusy = true;
-  $("analyze-photo").disabled = true;
-  const url = URL.createObjectURL(file);
-  try {
-    const image = new Image();
-    image.src = url;
-    await image.decode();
-    const scale = Math.min(1, 1600 / Math.max(image.width, image.height)),
-      canvas = document.createElement("canvas");
-    canvas.width = Math.round(image.width * scale);
-    canvas.height = Math.round(image.height * scale);
-    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
-    photoData = canvas.toDataURL("image/jpeg", 0.85);
-    photoImage = new Image();
-    photoImage.src = photoData;
-    await photoImage.decode();
-    drawPhoto();
-    $("scan-message").textContent =
-      "Photo ready. Choose Analyze photo to recognize items.";
-    $("analyze-photo").disabled = false;
-  } catch {
-    resetPhoto();
-    $("scan-message").textContent =
-      "This photo could not be opened. Try a JPEG or PNG image.";
-  } finally {
-    photoBusy = false;
-    URL.revokeObjectURL(url);
-  }
-});
-$("scan-location").addEventListener("change", () => {
-  photoScan = null;
-  photoKey = null;
-  $("scan-review").hidden = true;
-  $("scan-message").textContent = photoData
-    ? "Destination changed. Analyze the photo again."
-    : "";
-});
-$("analyze-photo").addEventListener("click", async () => {
-  if (photoBusy || !photoData) return;
-  const location = Number($("scan-location").value);
-  if (!location) {
-    $("scan-message").textContent =
-      "Create a location using the Android administrator screen first.";
-    return;
-  }
-  photoBusy = true;
-  $("analyze-photo").disabled = true;
-  $("scan-photo").disabled = true;
-  $("scan-location").disabled = true;
-  $("scan-review").hidden = true;
-  $("scan-message").textContent = "Analyzing this photo…";
-  try {
-    const scan = await api("/scans", {
-      location_id: location,
-      image: photoData.split(",")[1],
-    });
-    photoScan = scan;
-    photoKey = crypto.randomUUID();
-    drawPhoto(scan.detections);
-    const counts = new Map();
-    for (const d of scan.detections)
-      if (d.item_id) counts.set(d.item_id, (counts.get(d.item_id) || 0) + 1);
-    const lines = clear("scan-lines");
-    const items = new Map(state.inventory.items.map((i) => [i.id, i]));
-    for (const row of scan.snapshot) {
-      const item = items.get(row.item_id),
-        line = element("div", undefined, "scan-line"),
-        select = document.createElement("input");
-      select.type = "checkbox";
-      select.dataset.item = String(row.item_id);
-      select.checked = (counts.get(row.item_id) || 0) > 0;
-      const label = element("label");
-      label.append(
-        select,
-        document.createTextNode(item ? item.name : "Item #" + row.item_id),
-      );
-      const quantity = document.createElement("input");
-      quantity.type = "number";
-      quantity.min = "1";
-      quantity.step = "1";
-      quantity.value = String(counts.get(row.item_id) || 0);
-      quantity.dataset.quantity = String(row.item_id);
-      quantity.setAttribute(
-        "aria-label",
-        "Quantity to add for " + (item ? item.name : "item"),
-      );
-      line.append(label, element("span", "Quantity to add"), quantity);
-      lines.append(line);
-    }
-    const unknown = scan.detections
-      .filter((d) => !d.item_id)
-      .map((d) => d.name);
-    $("scan-message").textContent =
-      scan.warning +
-      (unknown.length
-        ? " Unmapped classes: " +
-          [...new Set(unknown)].join(", ") +
-          ". Register these before adding."
-        : "");
-    $("scan-reason").value = "";
-    $("scan-error").textContent = "";
-    $("scan-review").hidden = false;
-  } catch (error) {
-    $("scan-message").textContent = error.message;
-  } finally {
-    photoBusy = false;
-    $("analyze-photo").disabled = false;
-    $("scan-photo").disabled = false;
-    $("scan-location").disabled = false;
-  }
-});
-$("discard-photo").addEventListener("click", () => {
-  if (!photoBusy) resetPhoto();
-});
-$("scan-review").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (photoBusy || !photoScan) return;
-  const items = [];
-  for (const check of $("scan-lines").querySelectorAll(
-    "input[type=checkbox]:checked",
-  )) {
-    const quantity = Number(
-      $("scan-lines").querySelector(
-        '[data-quantity="' + check.dataset.item + '"]',
-      ).value,
-    );
-    if (!Number.isSafeInteger(quantity) || quantity < 1) {
-      $("scan-error").textContent =
-        "Selected quantities must be positive whole numbers.";
-      return;
-    }
-    items.push({ item_id: Number(check.dataset.item), quantity });
-  }
-  if (!items.length) {
-    $("scan-error").textContent =
-      "Select an item to add, or discard this photo.";
-    return;
-  }
-  const reason = $("scan-reason").value.trim();
-  if (!reason) return;
-  const total = items.reduce((sum, i) => sum + i.quantity, 0);
-  if (
-    !confirm(
-      "Add " +
-        total +
-        " NEW units to inventory? Existing stock will increase by these quantities.",
-    )
-  )
-    return;
-  photoBusy = true;
-  $("add-photo").disabled = true;
-  $("discard-photo").disabled = true;
-  try {
-    await api("/scan-additions", {
-      scan_id: photoScan.id,
-      items,
-      reason,
-      confirmed: true,
-      request_key: photoKey,
-    });
-    resetPhoto();
-    $("scan-message").textContent = total + " units added to inventory.";
-    await refresh();
-  } catch (error) {
-    $("scan-error").textContent = error.message;
-  } finally {
-    photoBusy = false;
-    $("add-photo").disabled = false;
-    $("discard-photo").disabled = false;
-  }
-});
-
 async function restoreSession() {
   try { token = sessionStorage.getItem('movis-session') || ''; } catch { return; }
   if (!token) return;

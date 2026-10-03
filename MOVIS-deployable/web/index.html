@@ -24,7 +24,7 @@
             alongside your Android scanner.
           </p>
         </div>
-        <div class="login-foot">PHOTO SCANNING · INVENTORY · RETURNS<br />One warehouse. A shared source of stock records.</div>
+        <div class="login-foot">INVENTORY · STOCK ACTIVITY · RETURNS<br />One warehouse. A shared source of stock records.</div>
       </div>
       <div class="login-panel">
         <form id="login-form">
@@ -62,7 +62,7 @@
             <span aria-hidden="true">◫</span>Overview</button
           ><button class="nav" data-page="inventory">
             <span aria-hidden="true">▦</span>Inventory</button
-          ><button class="nav" data-page="scan"><span aria-hidden="true">▣</span>Photo scan</button>
+          >
           <button class="nav" data-page="returns">
             <span aria-hidden="true">↺</span>Returns</button
           ><button class="nav" data-page="activity">
@@ -282,57 +282,6 @@
             <div id="adjustment-table" class="table-wrap"></div>
           </article>
         </section>
-        <section id="scan-page" class="page" hidden>
-          <article class="panel">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">PHOTO INVENTORY ENTRY</p>
-                <h2>Take a photo, then review</h2>
-              </div>
-            </div>
-            <p class="muted">
-              Photograph new incoming items, analyze the still image, and edit
-              the quantities before adding. Adding items already recorded would
-              double-count stock.
-            </p>
-            <div class="filters">
-              <label for="scan-location"
-                >Destination location<select id="scan-location"></select></label
-              ><label for="scan-photo"
-                >Take or choose a photo<input
-                  id="scan-photo"
-                  type="file"
-                  accept="image/*"
-                  capture="environment" /></label
-              ><button id="analyze-photo" class="primary" disabled>
-                Analyze photo
-              </button>
-            </div>
-            <canvas
-              id="scan-canvas"
-              hidden
-              aria-label="Uploaded photograph with detection boxes"
-            ></canvas>
-            <p id="scan-message" role="status"></p>
-            <form id="scan-review" hidden>
-              <div id="scan-lines"></div>
-              <label for="scan-reason"
-                >Reason / receipt reference<input
-                  id="scan-reason"
-                  required
-                  maxlength="500"
-              /></label>
-              <div class="scan-actions">
-                <button id="add-photo" class="primary">
-                  Add selected items to inventory</button
-                ><button id="discard-photo" type="button" class="secondary">
-                  Discard — do not add
-                </button>
-              </div>
-              <p id="scan-error" class="error" role="alert"></p>
-            </form>
-          </article>
-        </section>
         <section id="security-page" class="page" hidden>
           <div class="security-grid">
             <article class="panel">
@@ -346,14 +295,14 @@
                 <label for="security-confirm">Confirm new password</label>
                 <input id="security-confirm" type="password" autocomplete="new-password" maxlength="128" />
                 <p class="muted">Use 12–128 characters. A unique passphrase is easier to remember.</p>
-                <div class="scan-actions"><button class="primary" id="change-password" type="submit">Update password</button><button class="secondary" id="revoke-sessions" type="button">Sign out all devices</button></div>
+                <div class="action-row"><button class="primary" id="change-password" type="submit">Update password</button><button class="secondary" id="revoke-sessions" type="button">Sign out all devices</button></div>
                 <p id="security-error" class="error" role="alert"></p>
               </form>
             </article>
             <article class="panel security-guide">
               <p class="eyebrow">ACCESS &amp; ACCOUNTABILITY</p><h2>Use the right level of access</h2>
               <div class="security-item"><strong>Administrator</strong><p>Manage items, locations and personnel. Give this role only to warehouse managers.</p></div>
-              <div class="security-item"><strong>Operator</strong><p>Scan photos, confirm stock changes and process returns.</p></div>
+              <div class="security-item"><strong>Operator</strong><p>Confirm stock changes and process returns. Photo scanning is available in the Android app.</p></div>
               <div class="security-item"><strong>Viewer</strong><p>Monitor inventory and reports without changing stock.</p></div>
               <div class="security-item"><strong>Shared computer protection</strong><p>This dashboard signs out after 15 minutes without keyboard, pointer or touch activity. Sessions also expire on the server after eight hours.</p></div>
               <p class="panel-foot">Use individual accounts so the stock history identifies who made each change.</p>
@@ -381,7 +330,7 @@
           >Reason for change<input id="edit-reason" required maxlength="500"
         /></label>
         <p id="edit-error" class="error" role="alert"></p>
-        <div class="scan-actions">
+        <div class="action-row">
           <button id="edit-save" class="primary">Save quantity</button
           ><button id="edit-cancel" type="button" class="secondary">
             Cancel
