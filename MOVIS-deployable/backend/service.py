@@ -83,6 +83,7 @@ class Service:
 
     def login(self, data):
         with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
             user = con.execute('SELECT * FROM users WHERE username=?', (data.get('username'),)).fetchone()
             password = data.get('password', '')
             if not isinstance(password, str) or not user or not hmac.compare_digest(user['password'], password_hash(password, user['password'].split(':')[0])):
@@ -109,6 +110,30 @@ class Service:
                     'items': [dict(r) for r in con.execute('SELECT * FROM items ORDER BY name')],
                     'locations': [dict(r) for r in con.execute('SELECT * FROM locations ORDER BY name')],
                     'stock': [dict(r) for r in con.execute('SELECT s.*,i.name,i.sku,l.name AS location FROM stock s JOIN items i ON i.id=s.item_id JOIN locations l ON l.id=s.location_id ORDER BY i.name,l.name')]}
+
+    def account_security(self, user, data):
+        """Re-authenticate and atomically revoke every device session for this account."""
+        current = data.get('current_password')
+        action = data.get('action')
+        if not isinstance(current, str) or len(current) > 500:
+            raise Error('Enter your current password')
+        if action not in ('change_password', 'revoke_sessions'):
+            raise Error('Choose a valid account security action')
+        new = data.get('new_password')
+        if action == 'change_password':
+            if not isinstance(new, str) or not 12 <= len(new) <= 128:
+                raise Error('Use a new password between 12 and 128 characters')
+            if new == current:
+                raise Error('Choose a different password')
+        with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
+            account = con.execute('SELECT * FROM users WHERE id=?', (user['id'],)).fetchone()
+            if not account or not hmac.compare_digest(account['password'], password_hash(current, account['password'].split(':')[0])):
+                raise Error('Current password is incorrect', 403)
+            if action == 'change_password':
+                con.execute('UPDATE users SET password=? WHERE id=?', (password_hash(new), user['id']))
+            con.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
+        return {'message': 'Password changed. Sign in again.' if action == 'change_password' else 'All devices signed out. Sign in again.'}
 
     def catalog(self, user, data):
         self.authorize(user, True)

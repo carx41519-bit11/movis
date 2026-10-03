@@ -65,4 +65,41 @@ class CloudTests(unittest.TestCase):
             con.execute('UPDATE sessions SET expires=0 WHERE token=?',(token,))
         self.assertEqual(self.request('/session',token=token)[0],401)
 
+    def test_password_change_requires_password_and_revokes_all_devices(self):
+        first=self.login();second=self.login()
+        payload={'action':'change_password','current_password':'wrong','new_password':'new-private-password-2026'}
+        self.assertEqual(self.request('/account/security',payload,first)[0],403)
+        self.assertEqual(self.request('/session',token=second)[0],200)
+        payload['current_password']='private-password-2026'
+        payload['new_password']='short'
+        self.assertEqual(self.request('/account/security',payload,first)[0],400)
+        payload['new_password']='new-private-password-2026'
+        self.assertEqual(self.request('/account/security',payload,first)[0],200)
+        for token in (first,second):self.assertEqual(self.request('/session',token=token)[0],401)
+        self.assertEqual(self.request('/login',{'username':'cloudadmin','password':'private-password-2026'})[0],401)
+        self.assertEqual(self.request('/login',{'username':'cloudadmin','password':payload['new_password']})[0],200)
+
+    def test_revoke_is_scoped_to_own_account_and_rate_limited(self):
+        admin=self.login()
+        self.service.create_user(self.service.auth(admin),{'username':'reader','password':'reader-password-2026','role':'viewer'})
+        reader=self.service.login({'username':'reader','password':'reader-password-2026'})['token']
+        payload={'action':'revoke_sessions','current_password':'reader-password-2026'}
+        self.assertEqual(self.request('/account/security',payload,reader)[0],200)
+        self.assertEqual(self.request('/session',token=reader)[0],401)
+        self.assertEqual(self.request('/session',token=admin)[0],200)
+        for _ in range(5):self.assertEqual(self.request('/account/security',{'action':'revoke_sessions','current_password':'wrong'},admin)[0],403)
+        self.assertEqual(self.request('/account/security',{'action':'revoke_sessions','current_password':'wrong'},admin)[0],429)
+
+    def test_cross_origin_post_blocked_and_permissions_header(self):
+        raw=b'{}';status=[]
+        environ={'REQUEST_METHOD':'POST','PATH_INFO':'/login','CONTENT_LENGTH':'2','CONTENT_TYPE':'application/json','wsgi.input':io.BytesIO(raw),'HTTP_ORIGIN':'https://evil.example','HTTP_HOST':'movis.example'}
+        self.app(environ,lambda s,h:status.append(s))
+        self.assertTrue(status[0].startswith('403'))
+        raw=json.dumps({'username':'cloudadmin','password':'private-password-2026'}).encode()
+        environ.update(HTTP_ORIGIN='https://movis.example',CONTENT_LENGTH=str(len(raw)))
+        environ['wsgi.input']=io.BytesIO(raw);status.clear()
+        self.app(environ,lambda s,h:status.append(s))
+        self.assertTrue(status[0].startswith('200'))
+        self.assertIn('microphone=()',self.request('/')[2]['Permissions-Policy'])
+
 if __name__=='__main__':unittest.main()

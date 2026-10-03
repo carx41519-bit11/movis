@@ -72,6 +72,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200,{'rows':rows})
             if self.command == 'POST':
                 actions = {'/catalog':self.service.catalog,'/users':self.service.create_user,'/scans':self.service.scan,'/scan-additions':self.service.add_scan,'/manual-adjustments':self.service.manual_adjust,'/adjustments':self.service.adjust,'/returns':self.service.create_return}
+                if path.path == '/account/security':
+                    return self.send(200,self.service.account_security(user,data))
                 if path.path in actions:
                     return self.send(200,actions[path.path](user,data))
                 if path.path.startswith('/returns/'):

@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from service import Service, Error
 
 MAX_BODY = 9 * 1024 * 1024
@@ -22,6 +22,7 @@ class Application:
     def __init__(self, service):
         self.service=service
         self.attempts={}
+        self.security_attempts={}
         self.lock=threading.Lock()
 
     def dispatch(self, environ):
@@ -37,6 +38,11 @@ class Application:
         if method not in ['GET','POST']:raise Error('Method not allowed',405)
         data={}
         if method=='POST':
+            origin=environ.get('HTTP_ORIGIN')
+            if origin:
+                parsed=urlsplit(origin)
+                if parsed.scheme not in ('http','https') or parsed.netloc.casefold()!=environ.get('HTTP_HOST','').casefold():
+                    raise Error('Cross-site requests are not allowed',403)
             length=int(environ.get('CONTENT_LENGTH') or 0)
             if length<1 or length>MAX_BODY:raise Error('Invalid request size',413)
             if environ.get('CONTENT_TYPE','').split(';')[0].strip()!='application/json':raise Error('Send application/json',415)
@@ -55,6 +61,14 @@ class Application:
                 self.attempts[key]=recent+[time.time()]
             return 200,self.service.login(data),'application/json'
         user=self.service.auth(environ.get('HTTP_AUTHORIZATION','').removeprefix('Bearer '))
+        if method=='POST' and path=='/account/security':
+            with self.lock:
+                key='security:'+str(user['id'])
+                self.security_attempts={k:v for k,v in self.security_attempts.items() if v and v[-1]>time.time()-60}
+                recent=[t for t in self.security_attempts.get(key,[]) if t>time.time()-60]
+                if len(recent)>=5:raise Error('Too many security attempts. Wait one minute.',429)
+                self.security_attempts[key]=recent+[time.time()]
+            return 200,self.service.account_security(user,data),'application/json'
         if method=='GET':
             if path=='/session':return 200,user,'application/json'
             if path=='/inventory':return 200,self.service.inventory(),'application/json'
@@ -96,6 +110,7 @@ class Application:
         headers=[('Content-Type',mime+'; charset=utf-8'),('Content-Length',str(len(body))),
                  ('Cache-Control','no-store'),('X-Content-Type-Options','nosniff'),
                  ('Referrer-Policy','same-origin'),('X-Frame-Options','DENY'),
+                 ('Permissions-Policy','camera=(self), microphone=(), geolocation=()'),
                  ('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")]
         if os.environ.get('MOVIS_HTTPS_HOSTING')=='1':headers.append(('Strict-Transport-Security','max-age=31536000'))
         start_response(str(status)+' '+HTTPStatus(status).phrase,headers)
